@@ -9,7 +9,7 @@ from django.utils.text import slugify
 # Create your models here.
 
 class User(AbstractUser):
-    pass
+    email = models.EmailField(unique=True)
 
 class Product(models.Model):
     name = models.CharField(max_length=200)
