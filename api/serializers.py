@@ -4,7 +4,6 @@ from .models import Product, Order, OrderItem, User, Address, Cart, CartItem, Ca
 
 
 class UserReadSerializer(serializers.ModelSerializer):
-    full_name = serializers.SerializerMethodField()
     orders_count = serializers.SerializerMethodField()
     orders = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
 
@@ -14,14 +13,11 @@ class UserReadSerializer(serializers.ModelSerializer):
             "id", 
             "username", 
             "email", 
-            "first_name", 
+            "first_name",
             "last_name",
             "orders",
             "orders_count"
         )
-
-    def get_full_name(self, obj):
-        return obj.get_full_name()
     
     def get_orders_count(self, obj):
         return obj.orders.count()
@@ -52,7 +48,45 @@ class UserCreateSerializer(serializers.ModelSerializer):
         user.set_password(password)
         user.save()
         return user
+
+
+class UserUpdateSerializer(serializers.ModelSerializer):
+    password = serializers.CharField(write_only=True, required=False, min_length=8)
+
+    class Meta:
+        model = User
+        fields = (
+            "username", 
+            "email", 
+            "first_name",
+            "last_name",
+            "password",
+        )
+
+    def validate_email(self, value):
+        normalized_email = value.strip().lower()
+        qs = User.objects.filter(email__iexact=normalized_email)
+        if self.instance is not None:
+            # Exclude current user on update so unchanged email does not fail uniqueness validation.
+            qs = qs.exclude(pk=self.instance.pk)
+
+        if qs.exists():
+            raise serializers.ValidationError("A user with this email address already exists.")
+        
+        return normalized_email
     
+    def update(self, instance, validated_data):
+        password = validated_data.pop("password", None)
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        if password:
+            instance.set_password(password)
+
+        instance.save()
+        return instance
+
 
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -71,11 +105,11 @@ class CategorySerializer(serializers.ModelSerializer):
 # READ
 class ProductSerializer(serializers.ModelSerializer):
     category = CategorySerializer(read_only=True)
-    in_stock = serializers.ReadOnlyField()
+    in_stock = serializers.ReadOnlyField() #Custom field
 
     class Meta:
         model = Product
-        fields = (
+        fields = ( #Fields to be included in the serializer output
             'id',
             'name',
             'slug',
