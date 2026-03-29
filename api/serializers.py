@@ -138,7 +138,6 @@ class ProductCreateUpdateSerializer(serializers.ModelSerializer):
         model = Product
         fields = (
             'name',
-            'slug',
             'category',
             'description',
             'price',
