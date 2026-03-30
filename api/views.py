@@ -30,16 +30,29 @@ class UserMeUpdateView(generics.UpdateAPIView):
 
 # PRODUCT Views
 
-class ProductListView(generics.ListAPIView):
+class ProductListCreateView(generics.ListCreateAPIView):
     queryset = Product.objects.filter(is_active=True).select_related("category")
-    serializer_class = ProductSerializer
-    permission_classes = [AllowAny]
 
-class ProductCreateView(generics.CreateAPIView):
-    serializer_class = ProductCreateUpdateSerializer
-    permission_classes = [IsAdminUser]
-
-class ProductUpdateView(generics.RetrieveUpdateDestroyAPIView):
+    def get_serializer_class(self):
+        if self.request.method == "GET":
+            return ProductSerializer
+        return ProductCreateUpdateSerializer
+    
+    def get_permissions(self):
+        if self.request.method == "POST":
+            return [IsAdminUser()]
+        return [AllowAny()]
+    
+class ProductRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Product.objects.select_related("category")
-    serializer_class = ProductCreateUpdateSerializer
-    permission_classes = [IsAdminUser]
+    lookup_field = "pk"
+
+    def get_serializer_class(self):
+        if self.request.method == "GET":
+            return ProductSerializer
+        return ProductCreateUpdateSerializer
+    
+    def get_permissions(self):
+        if self.request.method in ["PUT", "PATCH", "DELETE"]:
+            return [IsAdminUser()]
+        return [AllowAny()]
