@@ -178,7 +178,7 @@ class CartItem(models.Model):
     added_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        # Aynı sepette aynı ürünün ikinci satır olarak tekrar açılmasını engeller.
+        # Prevents duplicate rows for the same product in a single cart.
         constraints = [
             models.UniqueConstraint(fields=["cart", "product"], name="unique_cart_product")
         ]
@@ -189,7 +189,7 @@ class CartItem(models.Model):
 
 class Category(models.Model):
     name = models.CharField(max_length=120, unique=True)
-    slug = models.SlugField(max_length=140, unique=True, blank=True) # URL-friendly kimlik (or: coffee-machine-pro) / unique=True ile her kategori slug’ı tekil olur.
+    slug = models.SlugField(max_length=140, unique=True, blank=True) # URL-friendly identifier (e.g., coffee-machine-pro); unique=True keeps each category slug distinct.
     description = models.TextField(blank=True)
     parent = models.ForeignKey(
         "self",
@@ -201,9 +201,9 @@ class Category(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["name"] # Category.objects.all() gibi sorgular varsayılan olarak ada göre sıralı gelir.
+        ordering = ["name"] # Category queries such as Category.objects.all() are ordered by name by default.
 
-    # Kategori kaydedilirken slug boşsa otomatik doldurur.
+    # Auto-fills slug from name when it is left blank.
     def save(self, *args, **kwargs):
         if not self.slug:
             self.slug = slugify(self.name)

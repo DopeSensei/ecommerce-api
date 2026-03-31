@@ -100,6 +100,12 @@ class CategorySerializer(serializers.ModelSerializer):
             'parent',
             'created_at'
         )
+        # Slug is auto-generated in the model save() method, so clients should not send or edit it.
+        read_only_fields = (
+            'id',
+            'slug',
+            'created_at'
+        )
 
 
 # READ

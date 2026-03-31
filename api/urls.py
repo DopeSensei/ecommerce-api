@@ -7,5 +7,8 @@ urlpatterns = [
     path("users/me/", views.UserMeUpdateView.as_view()),
 
     path("products/", views.ProductListCreateView.as_view()),
-    path("products/<int:pk>/", views.ProductRetrieveUpdateDestroyView.as_view()),
+    path("products/<int:product_id>/", views.ProductRetrieveUpdateDestroyView.as_view()),
+
+    path("categories/", views.CategoryListCreateView.as_view()),
+    path("categories/<int:category_id>/", views.CategoryRetrieveUpdateDestroyView.as_view())
 ]

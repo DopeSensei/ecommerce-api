@@ -1,7 +1,7 @@
 from django.shortcuts import render
 from rest_framework import filters, generics, viewsets
-from api.models import User, Product
-from api.serializers import UserCreateSerializer, UserReadSerializer, UserUpdateSerializer, ProductSerializer, ProductCreateUpdateSerializer
+from api.models import User, Product, Category
+from api.serializers import UserCreateSerializer, UserReadSerializer, UserUpdateSerializer, ProductSerializer, ProductCreateUpdateSerializer, CategorySerializer
 from api.permissions import IsAnonymous
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 
@@ -28,6 +28,28 @@ class UserMeUpdateView(generics.UpdateAPIView):
         return self.request.user
     
 
+# CATEGORY Views
+
+class CategoryListCreateView(generics.ListCreateAPIView):
+    queryset = Category.objects.order_by("name")
+    serializer_class = CategorySerializer
+
+    def get_permissions(self):
+        if self.request.method == "POST":
+            return [IsAdminUser()]
+        return [AllowAny()]
+    
+class CategoryRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
+    lookup_url_kwarg = "category_id"
+
+    def get_permissions(self):
+        if self.request.method in ["PUT", "PATCH", "DELETE"]:
+            return [IsAdminUser()]
+        return [AllowAny()]
+    
+
 # PRODUCT Views
 
 class ProductListCreateView(generics.ListCreateAPIView):
@@ -45,7 +67,7 @@ class ProductListCreateView(generics.ListCreateAPIView):
     
 class ProductRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Product.objects.select_related("category")
-    lookup_field = "pk"
+    lookup_url_kwarg = "product_id"
 
     def get_serializer_class(self):
         if self.request.method == "GET":
