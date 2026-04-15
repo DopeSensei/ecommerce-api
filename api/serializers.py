@@ -3,6 +3,8 @@ from rest_framework import serializers
 from .models import Product, Order, OrderItem, User, Address, Cart, CartItem, Category
 
 
+# USER Serializers
+
 class UserReadSerializer(serializers.ModelSerializer):
     orders_count = serializers.SerializerMethodField()
     orders = serializers.PrimaryKeyRelatedField(many=True, read_only=True)
@@ -88,6 +90,7 @@ class UserUpdateSerializer(serializers.ModelSerializer):
         return instance
 
 
+# CATEGORY Serializers
 
 class CategorySerializer(serializers.ModelSerializer):
     class Meta:
@@ -107,6 +110,8 @@ class CategorySerializer(serializers.ModelSerializer):
             'created_at'
         )
 
+
+# PRODUCT Serializers
 
 # READ
 class ProductSerializer(serializers.ModelSerializer):
@@ -184,4 +189,207 @@ class CartItemSerializer(serializers.ModelSerializer):
         )
 
 
+# ORDER Serializers
+
+class OrderItemReadSerializer(serializers.ModelSerializer):
+    product_id = serializers.IntegerField(source="product.id", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    product_slug = serializers.CharField(source="product.slug", read_only=True)
+    # Use purchase-time snapshot price for financial consistency; avoid exposing mutable live product prices.
+    item_subtotal = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OrderItem
+        fields = (
+            "product_id",
+            "product_name",
+            "product_slug",
+            "quantity",
+            "price_at_purchase",
+            "item_subtotal",
+        )
+
+    def get_item_subtotal(self, obj):
+        return obj.item_subtotal
+
+
+class OrderItemCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OrderItem
+        fields = ("product", "quantity")
+
+    def validate_quantity(self, value):
+        if value < 1:
+            raise serializers.ValidationError("Quantity must be at least 1.")
+        return value
     
+    def validate(self, attrs):
+        product = attrs.get("product")
+        quantity = attrs.get("quantity")
+
+        # Cross-field validation: only active products with sufficient stock can be added to an order.
+        if product is not None and not product.is_active:
+            raise serializers.ValidationError({"product": "This product is inactive."})
+        
+        if product is not None and quantity is not None and product.stock < quantity:
+            raise serializers.ValidationError(
+                {"quantity": f"Only {product.stock} item(s) available in stock."}
+            )
+
+        return attrs
+
+
+class OrderReadSerializer(serializers.ModelSerializer):
+    items = OrderItemReadSerializer(many=True, read_only=True)
+    user_id = serializers.IntegerField(source="user.id", read_only=True, allow_null=True)
+    user_email = serializers.EmailField(source="user.email", read_only=True, allow_null=True)
+
+    class Meta:
+        model = Order
+        fields = (
+            "order_id",
+            "user_id",
+            "user_email",
+            "status",
+            "payment_status",
+            "payment_id",
+            "total_price",
+            "shipping_address",
+            "billing_address",
+            "items",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
+class OrderCreateSerializer(serializers.ModelSerializer):
+    items = OrderItemCreateSerializer(many=True, write_only=True)
+
+    class Meta:
+        model = Order
+        fields = (
+            "order_id",
+            "shipping_address",
+            "billing_address",
+            "items",
+            "status",
+            "payment_status",
+            "payment_id",
+            "total_price",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = (
+            "order_id",
+            "status",
+            "payment_status",
+            "payment_id",
+            "total_price",
+            "created_at",
+            "updated_at",
+        )
+
+    def validate_items(self, value):
+        if not value:
+            raise serializers.ValidationError("Order must contain at least one item.")
+        return value
+    
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = request.user if request and request.user.is_authenticated else None
+
+        shipping_address = attrs.get("shipping_address")
+        billing_address = attrs.get("billing_address")
+
+        # If user in authenticated, addresses must belong to that user.
+        if user:
+            if shipping_address and shipping_address.user_id != user.id:
+                raise serializers.ValidationError(
+                    {"shipping_address": "You can only use your own shipping address."}
+                )
+            if billing_address and billing_address.user_id != user.id:
+                raise serializers.ValidationError(
+                    {"billing_address": "You can only use your own billing address."}
+                )
+            
+        return attrs
+
+    
+    def create(self, validated_data):
+        items_data = validated_data.pop("items") # Remove nested items before creating Order; items belong to OrderItem rows.
+        request = self.context.get("request")
+        user = request.user if request and request.user.is_authenticated else None
+
+        with transaction.atomic(): # Ensure order + order items are saved atomically (all-or-nothing).
+            order = Order.objects.create(user=user, **validated_data)
+
+            for item in items_data:
+                product = item["product"]
+                quantity = item["quantity"]
+
+                OrderItem.objects.create(
+                    order=order,
+                    product=product,
+                    quantity=quantity,
+                    price_at_purchase=product.get_effective_price(),
+                )
+
+            order.calculate_total()
+        
+        return order
+
+
+# Admin
+class OrderStatusUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Order
+        fields = ("status",)
+
+    def validate_status(self, value):
+        current_status = self.instance.status if self.instance else None
+
+        locked_statuses = {Order.StatusChoices.DELIVERED}
+        if current_status in locked_statuses and value != current_status:
+            raise serializers.ValidationError("Finalized orders cannot change status.")
+
+        return value        
+
+
+# Admin/Webhook
+class OrderPaymentUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Order
+        fields = ("payment_status", "payment_id")
+
+    def validate_payment_id(self, value):
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
+        
+    def validate(self, attrs):
+        current_status = self.instance.payment_status if self.instance else None
+        payment_status = attrs.get("payment_status", current_status)
+        payment_id = attrs.get(
+            "payment_id",
+            self.instance.payment_id if self.instance else None
+        )
+
+        # Payment reference should exist for paid/refunded/failed states.
+        if payment_status in {"paid", "failed", "refunded"} and not payment_id:
+            raise serializers.ValidationError(
+                {"payment_id": "payment_id is required for this payment status."}
+            )
+
+        # Prevent going backwards from paid to unpaid.
+        if current_status == "paid" and payment_status == "unpaid":
+            raise serializers.ValidationError(
+                {"payment_status": "Paid orders cannot be set back to unpaid."}
+            )
+
+        return attrs
+        
+
+
