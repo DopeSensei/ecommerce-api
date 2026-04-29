@@ -184,7 +184,7 @@ class CartItem(models.Model):
         ]
 
     def get_total_price(self):
-        return self.product.price * self.quantity
+        return self.product.get_effective_price() * self.quantity
     
 
 class Category(models.Model):

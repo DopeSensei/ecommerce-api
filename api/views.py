@@ -1,8 +1,8 @@
 from django.shortcuts import render
-from rest_framework import filters, generics, viewsets, mixins
+from rest_framework import filters, generics, viewsets, mixins, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
-from api.models import User, Product, Category, Order
+from api.models import User, Product, Category, Order, Cart, CartItem
 from api.serializers import (
     UserCreateSerializer, 
     UserReadSerializer, 
@@ -14,6 +14,10 @@ from api.serializers import (
     OrderCreateSerializer,
     OrderStatusUpdateSerializer,
     OrderPaymentUpdateSerializer,
+    CartSerializer,
+    CartItemCreateSerializer,
+    CartItemReadSerializer,
+    CartItemQuantityUpdateSerializer,
 )
 from api.permissions import IsAnonymous
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
@@ -93,8 +97,71 @@ class ProductRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
         return [AllowAny()]
     
 
+# CART Views
+
+class CartView(generics.RetrieveAPIView):
+    serializer_class = CartSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self):
+        # get_or_create() returns (object, created); "_" means the second value is intentionally unused here.
+        cart, _ = Cart.objects.get_or_create(user=self.request.user)
+        return cart
+    
+
+class CartItemAddView(generics.CreateAPIView):
+    serializer_class = CartItemCreateSerializer
+    permission_classes = [IsAuthenticated]
+
+    def create(self, request, *args, **kwargs):
+        cart, _ = Cart.objects.get_or_create(user=request.user)
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        product = serializer.validated_data["product"]
+        quantity = serializer.validated_data["quantity"]
+
+        cart_item, created = CartItem.objects.get_or_create(
+            cart=cart,
+            product=product,
+            defaults={"quantity": quantity}
+        )
+
+        # "created" is the boolean returned by get_or_create()
+        if not created:
+            new_quantity = cart_item.quantity + quantity
+            if product.stock < new_quantity:
+                return Response(
+                    {"quantity": f"Only {product.stock} item(s) available in stock."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            cart_item.quantity = new_quantity
+            cart_item.save(update_fields=["quantity"])
+
+        return Response(
+            CartSerializer(cart, context={"request": request}).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class CartItemUpdateDeleteView(generics.RetrieveUpdateDestroyAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return CartItem.objects.filter(cart__user=self.request.user).select_related("product")
+
+    def get_serializer_class(self):
+        if self.request.method == "GET":
+            return CartItemReadSerializer
+        return CartItemQuantityUpdateSerializer
+
+    
 # ORDER Views
 
+# Orders are more than a simple CRUD resource; they follow a lifecycle.
+# Besides create/list/retrieve, they also require domain-specific actions such as
+# status updates and payment updates, so grouping them under a single ViewSet
+# keeps the API more consistent and easier to extend.
 class OrderViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,

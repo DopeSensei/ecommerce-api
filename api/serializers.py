@@ -175,19 +175,97 @@ class ProductCreateUpdateSerializer(serializers.ModelSerializer):
         return attrs
 
 
-# Represent items inside a user's class
-class CartItemSerializer(serializers.ModelSerializer):
-    product = ProductSerializer(read_only=True) # read_only=True dogru mu?
+# CART Serializers
+
+class CartItemReadSerializer(serializers.ModelSerializer):
+    product_id = serializers.IntegerField(source="product.id", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    product_slug = serializers.CharField(source="product.slug", read_only=True)
+    item_total = serializers.SerializerMethodField()
 
     class Meta:
         model = CartItem
         fields = (
             "id",
-            "product",
+            "product_id",
+            "product_name",
+            "product_slug",
             "quantity",
-            "added_at"
+            "added_at",
+            "item_total",
         )
+    
+    def get_item_total(self, obj):
+        return obj.get_total_price()
+    
 
+class CartItemCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CartItem
+        fields = ("product", "quantity")
+
+    def validate_quantity(self, value):
+        if value < 1:
+            raise serializers.ValidationError("Quantity must be at least 1.")
+        return value
+    
+    def validate(self, attrs):
+        product = attrs.get("product")
+        quantity = attrs.get("quantity")
+
+        if product is not None and not product.is_active:
+            raise serializers.ValidationError({"product": "This product is inactive."})
+        
+        if product is not None and quantity is not None and product.stock < quantity:
+            raise serializers.ValidationError(
+                {"quantity": f"Only {product.stock} item(s) available in stock."}
+            )
+        
+        return attrs
+    
+
+class CartItemQuantityUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CartItem
+        fields = ("quantity",)
+
+    def validate_quantity(self, value):
+        if value < 1:
+            raise serializers.ValidationError("Quantity must be at least 1.")
+        return value
+    
+    def validate(self, attrs):
+        # On partial updates, missing fields are taken from the existing instance so stock checks still run correctly.
+        quantity = attrs.get("quantity", getattr(self.instance, "quantity", None))
+        # If "product" is omitted in PATCH requests, use the existing cart item's product from self.instance.
+        product = getattr(self.instance, "product", None)
+
+        if product is not None and quantity is not None and product.stock < quantity:
+            raise serializers.ValidationError(
+                {"quantity": f"Only {product.stock} item(s) available in stock."}
+            )
+        
+        return attrs
+
+
+class CartSerializer(serializers.ModelSerializer):
+    items = CartItemReadSerializer(many=True, read_only=True)
+    total = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Cart
+        fields = (
+            "id",
+            "items",
+            "total",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+    def get_total(self, obj):
+        return obj.get_total()
+    
 
 # ORDER Serializers
 
