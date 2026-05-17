@@ -18,6 +18,7 @@ from api.serializers import (
     CartItemCreateSerializer,
     CartItemReadSerializer,
     CartItemQuantityUpdateSerializer,
+    CheckoutSerializer,
 )
 from api.permissions import IsAnonymous
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
@@ -154,6 +155,20 @@ class CartItemUpdateDeleteView(generics.RetrieveUpdateDestroyAPIView):
         if self.request.method == "GET":
             return CartItemReadSerializer
         return CartItemQuantityUpdateSerializer
+    
+
+class CheckoutView(generics.GenericAPIView):
+    serializer_class = CheckoutSerializer
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        order = serializer.save()
+        return Response(
+            OrderReadSerializer(order, context=self.get_serializer_context()).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     
 # ORDER Views

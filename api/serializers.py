@@ -267,6 +267,91 @@ class CartSerializer(serializers.ModelSerializer):
         return obj.get_total()
     
 
+
+class CheckoutSerializer(serializers.Serializer):
+    shipping_address = serializers.PrimaryKeyRelatedField(queryset=Address.objects.all())
+    billing_address = serializers.PrimaryKeyRelatedField(queryset=Address.objects.all())
+
+    def validate(self, attrs):
+        # Get the current request so checkout can be tied to the authenticated user.
+        request = self.context.get("request")
+        user = request.user if request and request.user.is_authenticated else None
+
+        # Checkout requires a logged-in user because cart, addresses, and orders are user-owned.
+        if user is None:
+            raise serializers.ValidationError(("Authentication is required to checkout."))
+        
+        shipping_address = attrs["shipping_address"]
+        billing_address = attrs["billing_address"]
+
+        # Django automatically provides user_id for ForeignKey fields,
+        # so we can compare ownership without fetching another User object.
+        if shipping_address.user_id != user.id:
+            raise serializers.ValidationError(
+                {"shipping_address": "You can only use your own shipping address."}
+            )
+        
+        if billing_address.user_id != user.id:
+            raise serializers.ValidationError(
+                {"billing_address": "You can only use your own billing address."}
+            )
+        
+        # Fetch the user's cart with its items/products; checkout cannot continue with an empty cart.
+        try:
+            cart = Cart.objects.prefetch_related("items__product").get(user=user)
+        except Cart.DoesNotExist:
+            raise serializers.ValidationError({"cart": "Cart is empty."})
+        
+        cart_items = list(cart.items.all())
+        if not cart_items:
+            raise serializers.ValidationError({"cart": "Cart is empty."})
+        
+        attrs["cart"] = cart
+        attrs["cart_items"] = cart_items
+        return attrs
+    
+    def create(self, validated_data):
+        # These values are validation-only helpers, not Order model fields.
+        cart = validated_data.pop("cart")
+        cart_items = validated_data.pop("cart_items")
+        request = self.context.get("request")
+        user = request.user if request and request.user.is_authenticated else None
+
+        # Create the order, order items, stock updates, total calculation, and cart cleanup as one DB transaction.
+        with transaction.atomic():
+            order = Order.objects.create(user=user, **validated_data)
+
+            for cart_item in cart_items:
+                # Lock the product row during checkout so concurrent orders cannot oversell the same stock.
+                product = Product.objects.select_for_update().get(pk=cart_item.product_id)
+
+                if not product.is_active:
+                    raise serializers.ValidationError(
+                        {"product": f"{product.name} is inactive and cannot be checked out."}
+                    )
+                
+                if product.stock < cart_item.quantity:
+                    raise serializers.ValidationError(
+                        {"quantity": f"Only {product.stock} item(s) available for {product.name}"}
+                    )
+
+                # Store purchase-time price so future product price changes do not affect this order.
+                OrderItem.objects.create(
+                    order=order,
+                    product=product,
+                    quantity=cart_item.quantity,
+                    price_at_purchase=product.get_effective_price(),
+
+                )
+                product.reduce_stock(cart_item.quantity)
+
+            order.calculate_total()
+            # Checkout succeeded; remove purchased items from the user's cart.
+            cart.items.all().delete()
+
+        return order
+                
+
 # ORDER Serializers
 
 class OrderItemReadSerializer(serializers.ModelSerializer):
@@ -469,5 +554,3 @@ class OrderPaymentUpdateSerializer(serializers.ModelSerializer):
 
         return attrs
         
-
-
