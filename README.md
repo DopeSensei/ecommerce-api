@@ -82,3 +82,10 @@ This creates:
 - Add authentication and permissions
 - Add inventory/variant/payment/shipment models
 - Add automated tests
+
+## Future Improvements
+
+- Refunds and inventory restocking should be handled as separate business flows.
+  A refund means money is returned to the customer, but it does not always mean
+  the product is physically returned or sellable again. A future return/restock
+  workflow should decide when refunded items can be added back to inventory.

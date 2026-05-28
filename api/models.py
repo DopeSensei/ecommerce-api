@@ -1,5 +1,6 @@
 import uuid
-from django.db import models
+from django.db import models, transaction
+from django.db.models import F
 from django.contrib.auth.models import AbstractUser
 from django.conf import settings
 from decimal import Decimal
@@ -87,6 +88,19 @@ class Address(models.Model):
     country = models.CharField(max_length=100, default="Turkey")
     is_default = models.BooleanField(default=False)
 
+    # Address may change but the address during the ordering will stay the same.
+    def to_snapshot(self):
+        return {
+            "full_name": self.full_name,
+            "phone": self.phone,
+            "line1": self.line1,
+            "line2": self.line2,
+            "city": self.city,
+            "state": self.state,
+            "postal_code": self.postal_code,
+            "country": self.country,
+        }
+
     def __str__(self):
         return f"{self.full_name} - {self.city}"
     
@@ -109,6 +123,9 @@ class Order(models.Model):
     # Prevent address deletion while it is referenced by an order.
     shipping_address = models.ForeignKey("Address", on_delete=models.PROTECT, related_name="shipping_orders")
     billing_address = models.ForeignKey("Address", on_delete=models.PROTECT, related_name="billing_orders")
+    # Store order-time address copies so later address edits do not change historical orders.
+    shipping_address_snapshot = models.JSONField(default=dict, blank=True)
+    billing_address_snapshot = models.JSONField(default=dict, blank=True)
 
     payment_status = models.CharField(
         max_length=20,
@@ -123,6 +140,8 @@ class Order(models.Model):
 
     payment_id = models.CharField(max_length=100, unique=True, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
+    # Prevent returning stock more than once for the same order
+    stock_restored = models.BooleanField(default=False)
 
     def calculate_total(self):
         total = sum((item.item_subtotal for item in self.items.all()), Decimal("0.00"))
@@ -133,6 +152,32 @@ class Order(models.Model):
     def mark_as_paid(self):
         self.payment_status = "paid"
         self.save(update_fields=["payment_status"])
+
+    def restore_stock(self):
+        # Make sure ALL database operations here succeed.
+        # If even one of them fails, save none of them.
+        with transaction.atomic():
+            # Lock this order row so two concurrent requests cannot restore
+            # the same order's stock at the same time.
+            order = self.__class__.objects.select_for_update().get(pk=self.pk)
+
+            if order.stock_restored:
+                return False
+            
+            # If the order is cancelled, return each ordered product quantity back to stock.
+            for item in order.items.all():
+                # Find the product that is bound to this item,
+                # and update stock directly in the database using F() to avoid stale Python values.
+                Product.objects.filter(pk=item.product_id).update(
+                    stock=F("stock") + item.quantity
+                )
+
+            order.stock_restored = True
+            order.save(update_fields=["stock_restored"])
+
+            self.stock_restored = True
+            return True
+
 
     def __str__(self):
         username = self.user.username if self.user else "delete-user"

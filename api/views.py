@@ -1,4 +1,3 @@
-from django.shortcuts import render
 from rest_framework import filters, generics, viewsets, mixins, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
@@ -11,7 +10,6 @@ from api.serializers import (
     ProductCreateUpdateSerializer, 
     CategorySerializer,
     OrderReadSerializer,
-    OrderCreateSerializer,
     OrderStatusUpdateSerializer,
     OrderPaymentUpdateSerializer,
     CartSerializer,
@@ -180,7 +178,6 @@ class CheckoutView(generics.GenericAPIView):
 class OrderViewSet(
     mixins.ListModelMixin,
     mixins.RetrieveModelMixin,
-    mixins.CreateModelMixin,
     viewsets.GenericViewSet,
 ):
     # select_related joins single-value relations in one query;
@@ -197,8 +194,6 @@ class OrderViewSet(
         return qs.filter(user=self.request.user)
 
     def get_serializer_class(self):
-        if self.action == "create":
-            return OrderCreateSerializer
         if self.action == "set_status":
             return OrderStatusUpdateSerializer
         if self.action == "set_payment":

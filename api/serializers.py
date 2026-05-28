@@ -319,7 +319,15 @@ class CheckoutSerializer(serializers.Serializer):
 
         # Create the order, order items, stock updates, total calculation, and cart cleanup as one DB transaction.
         with transaction.atomic():
-            order = Order.objects.create(user=user, **validated_data)
+            shipping_address = validated_data["shipping_address"]
+            billing_address = validated_data["billing_address"]
+
+            order = Order.objects.create(
+                user=user,
+                shipping_address_snapshot=shipping_address.to_snapshot(),
+                billing_address_snapshot=billing_address.to_snapshot(),
+                **validated_data,
+            )
 
             for cart_item in cart_items:
                 # Lock the product row during checkout so concurrent orders cannot oversell the same stock.
@@ -376,31 +384,6 @@ class OrderItemReadSerializer(serializers.ModelSerializer):
         return obj.item_subtotal
 
 
-class OrderItemCreateSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = OrderItem
-        fields = ("product", "quantity")
-
-    def validate_quantity(self, value):
-        if value < 1:
-            raise serializers.ValidationError("Quantity must be at least 1.")
-        return value
-    
-    def validate(self, attrs):
-        product = attrs.get("product")
-        quantity = attrs.get("quantity")
-
-        # Cross-field validation: only active products with sufficient stock can be added to an order.
-        if product is not None and not product.is_active:
-            raise serializers.ValidationError({"product": "This product is inactive."})
-        
-        if product is not None and quantity is not None and product.stock < quantity:
-            raise serializers.ValidationError(
-                {"quantity": f"Only {product.stock} item(s) available in stock."}
-            )
-
-        return attrs
-
 
 class OrderReadSerializer(serializers.ModelSerializer):
     items = OrderItemReadSerializer(many=True, read_only=True)
@@ -419,89 +402,14 @@ class OrderReadSerializer(serializers.ModelSerializer):
             "total_price",
             "shipping_address",
             "billing_address",
+            "shipping_address_snapshot",
+            "billing_address_snapshot",
             "items",
             "created_at",
             "updated_at",
         )
         read_only_fields = fields
 
-
-class OrderCreateSerializer(serializers.ModelSerializer):
-    items = OrderItemCreateSerializer(many=True, write_only=True)
-
-    class Meta:
-        model = Order
-        fields = (
-            "order_id",
-            "shipping_address",
-            "billing_address",
-            "items",
-            "status",
-            "payment_status",
-            "payment_id",
-            "total_price",
-            "created_at",
-            "updated_at",
-        )
-        read_only_fields = (
-            "order_id",
-            "status",
-            "payment_status",
-            "payment_id",
-            "total_price",
-            "created_at",
-            "updated_at",
-        )
-
-    def validate_items(self, value):
-        if not value:
-            raise serializers.ValidationError("Order must contain at least one item.")
-        return value
-    
-
-    def validate(self, attrs):
-        request = self.context.get("request")
-        user = request.user if request and request.user.is_authenticated else None
-
-        shipping_address = attrs.get("shipping_address")
-        billing_address = attrs.get("billing_address")
-
-        # If user in authenticated, addresses must belong to that user.
-        if user:
-            if shipping_address and shipping_address.user_id != user.id:
-                raise serializers.ValidationError(
-                    {"shipping_address": "You can only use your own shipping address."}
-                )
-            if billing_address and billing_address.user_id != user.id:
-                raise serializers.ValidationError(
-                    {"billing_address": "You can only use your own billing address."}
-                )
-            
-        return attrs
-
-    
-    def create(self, validated_data):
-        items_data = validated_data.pop("items") # Remove nested items before creating Order; items belong to OrderItem rows.
-        request = self.context.get("request")
-        user = request.user if request and request.user.is_authenticated else None
-
-        with transaction.atomic(): # Ensure order + order items are saved atomically (all-or-nothing).
-            order = Order.objects.create(user=user, **validated_data)
-
-            for item in items_data:
-                product = item["product"]
-                quantity = item["quantity"]
-
-                OrderItem.objects.create(
-                    order=order,
-                    product=product,
-                    quantity=quantity,
-                    price_at_purchase=product.get_effective_price(),
-                )
-
-            order.calculate_total()
-        
-        return order
 
 
 # Admin
@@ -513,11 +421,29 @@ class OrderStatusUpdateSerializer(serializers.ModelSerializer):
     def validate_status(self, value):
         current_status = self.instance.status if self.instance else None
 
-        locked_statuses = {Order.StatusChoices.DELIVERED}
+        locked_statuses = {
+            Order.StatusChoices.DELIVERED,
+            Order.StatusChoices.CANCELLED,
+            }
+
         if current_status in locked_statuses and value != current_status:
             raise serializers.ValidationError("Finalized orders cannot change status.")
 
-        return value        
+        return value
+    
+    # Restore stock only when the order transitions into CANCELLED.
+    # If the order is already cancelled, stock must not be restored again.
+    # Delivered or cancelled orders should not move back to another status.
+    def update(self, instance, validated_data):
+        old_status = instance.status
+        new_status = validated_data.get("status", old_status)
+
+        instance = super().update(instance, validated_data)
+
+        if old_status != Order.StatusChoices.CANCELLED and new_status == Order.StatusChoices.CANCELLED:
+            instance.restore_stock()
+
+        return instance
 
 
 # Admin/Webhook
@@ -553,4 +479,14 @@ class OrderPaymentUpdateSerializer(serializers.ModelSerializer):
             )
 
         return attrs
+
+    # Restore stock if the payment is failed
+    def update(self, instance, validated_data):
+        old_payment_status = instance.payment_status
+        new_payment_status = validated_data.get("payment_status", old_payment_status)
+
+        instance = super().update(instance, validated_data)
+
+        if old_payment_status != "failed" and new_payment_status == "failed":
+            instance.restore_stock()
         

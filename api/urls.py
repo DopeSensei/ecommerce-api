@@ -1,9 +1,8 @@
 from django.urls import path
 from . import views
 
-order_list_create = views.OrderViewSet.as_view({
+order_list = views.OrderViewSet.as_view({
     "get": "list",
-    "post": "create",
 })
 
 order_detail = views.OrderViewSet.as_view({
@@ -35,7 +34,7 @@ urlpatterns = [
     path("cart/items/<int:pk>/", views.CartItemUpdateDeleteView.as_view()),
     path("checkout/", views.CheckoutView.as_view()),
 
-    path("orders/", order_list_create),
+    path("orders/", order_list),
     path("orders/<uuid:pk>/", order_detail),
     path("orders/<uuid:pk>/status/", order_set_status),
     path("orders/<uuid:pk>/payment/", order_set_payment),
