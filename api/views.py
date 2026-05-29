@@ -82,8 +82,15 @@ class ProductListCreateView(generics.ListCreateAPIView):
         return [AllowAny()]
     
 class ProductRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Product.objects.select_related("category")
     lookup_url_kwarg = "product_id"
+
+    # Public users should not access inactive products, but admins need full visibility for management.
+    def get_queryset(self):
+        queryset = Product.objects.select_related("category")
+
+        if self.request.user.is_staff:
+            return queryset
+        return queryset.filter(is_active=True)
 
     def get_serializer_class(self):
         if self.request.method == "GET":

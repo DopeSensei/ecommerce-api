@@ -167,6 +167,16 @@ class ProductCreateUpdateSerializer(serializers.ModelSerializer):
             if discount_price is None:
                 discount_price = self.instance.discount_price
 
+        if price is not None and price <= 0:
+            raise serializers.ValidationError(
+                {"price": "Price must be greater than 0."}
+            )
+
+        if discount_price is not None and discount_price <= 0:
+            raise serializers.ValidationError(
+                {"discount_price": "Discount price must be greater than 0."}
+            )
+
         if discount_price is not None and price is not None and discount_price > price:
             raise serializers.ValidationError(
                 {"discount_price": "Discount price cannot be greater than price."}

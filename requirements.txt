@@ -2,3 +2,4 @@ Django>=5.0
 djangorestframework
 psycopg[binary]
 Pillow>=10.0
+djangorestframework-simplejwt
