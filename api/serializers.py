@@ -499,4 +499,6 @@ class OrderPaymentUpdateSerializer(serializers.ModelSerializer):
 
         if old_payment_status != "failed" and new_payment_status == "failed":
             instance.restore_stock()
+
+        return instance
         
