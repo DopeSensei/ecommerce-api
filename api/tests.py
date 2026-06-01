@@ -57,7 +57,7 @@ class CheckoutFlowTests(APITestCase):
         # Does the response status code equal HTTP 201 Created?
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
-        self. product.refresh_from_db()
+        self.product.refresh_from_db()
         self.cart.refresh_from_db()
 
         self.assertEqual(Order.objects.count(), 1)
@@ -246,4 +246,170 @@ class OrderPermissionTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
+
+class InventoryRestoreTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="customer",
+            email="customer@example.com",
+            password="testpass123",
+        )
+        self.admin = User.objects.create_superuser(
+            username="admin",
+            email="admin@example.com",
+            password="adminpass123",
+        )
+        self.address = Address.objects.create(
+            user=self.user,
+            full_name="Customer User",
+            line1="Test Street1",
+            city="Istanbul",
+            postal_code="34000",
+            country="Turkey",
+        )
+        self.product = Product.objects.create(
+            name="Restock Product",
+            description="Test description",
+            price=Decimal("100.00"),
+            stock=8,
+        )
+        self.order = Order.objects.create(
+            user=self.user,
+            shipping_address=self.address,
+            billing_address=self.address,
+            shipping_address_snapshot=self.address.to_snapshot(),
+            billing_address_snapshot=self.address.to_snapshot(),
+        )
+        OrderItem.objects.create(
+            order=self.order,
+            product=self.product,
+            quantity=2,
+        )
+
+    def test_cancelled_order_restores_stock(self):
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.patch(
+            f"/api/orders/{self.order.order_id}/status/",
+            {"status": Order.StatusChoices.CANCELLED},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.product.refresh_from_db()
+        self.order.refresh_from_db()
+
+        self.assertEqual(self.product.stock, 10)
+        self.assertTrue(self.order.stock_restored)
+
+    def test_payment_failed_restores_stock(self):
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.patch(
+            f"/api/orders/{self.order.order_id}/payment/",
+            {
+                "payment_status": "failed",
+                "payment_id": "payment-test-123",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.product.refresh_from_db()
+        self.order.refresh_from_db()
+
+        self.assertEqual(self.product.stock, 10)
+        self.assertTrue(self.order.stock_restored)
+
+    def test_stock_is_not_restored_twice(self):
+        self.client.force_authenticate(user=self.admin)
+
+        self.client.patch(
+            f"/api/orders/{self.order.order_id}/status/",
+            {"status": Order.StatusChoices.CANCELLED},
+            format="json",
+        )
+
+        self.client.patch(
+            f"/api/orders/{self.order.order_id}/status/",
+            {"status": Order.StatusChoices.CANCELLED},
+            format="json",
+        )
+
+        self.product.refresh_from_db()
+        self.order.refresh_from_db()
+
+        self.assertEqual(self.product.stock, 10)
+        self.assertTrue(self.order.stock_restored)
+
     
+class ProductVisibilityTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="customer",
+            email="customer@example.com",
+            password="testpass123",
+        )
+        self.admin = User.objects.create_superuser(
+            username="admin",
+            email="admin@example.com",
+            password="adminpass123",
+        )
+        self.inactive_product = Product.objects.create(
+            name="Inactive Product",
+            description="Hidden product",
+            price=Decimal("25.00"),
+            stock=5,
+            is_active=False,
+        )
+
+    def test_inactive_product_cannot_be_added_to_cart(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            "/api/cart/items/",
+            {
+                "product": self.inactive_product.id,
+                "quantity": 1,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_public_user_cannot_retrieve_inactive_product(self):
+        response = self.client.get(f"/api/products/{self.inactive_product.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_admin_can_retrieve_inactive_product(self):
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.get(f"/api/products/{self.inactive_product.id}/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+
+class JWTAuthTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="jwtuser",
+            email="jwt@example.com",
+            password="testpass123",
+        )
+
+    def test_token_endpoint_returns_access_and_refresh_tokens(self):
+        response = self.client.post(
+            "/api/token/",
+            {
+                "username": "jwtuser",
+                "password": "testpass123",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("access", response.data)
+        self.assertIn("refresh", response.data)
