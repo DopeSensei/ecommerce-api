@@ -2,7 +2,7 @@ from decimal import Decimal
 from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.test import APITestCase
-from api.models import Address, Cart, CartItem, Order, OrderItem, Product
+from api.models import Address, Cart, CartItem, Order, OrderItem, Product, Category
 
 # Create your tests here.
 
@@ -413,3 +413,106 @@ class JWTAuthTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn("access", response.data)
         self.assertIn("refresh", response.data)
+
+
+class ProductListFilterSearchPaginationTest(APITestCase):
+    def setUp(self):
+        self.category_books = Category.objects.create(
+            name="Books",
+            slug="books",
+        )
+        self.category_electronics = Category.objects.create(
+            name="Electronics",
+            slug="electronics",
+        )
+
+        self.book = Product.objects.create(
+            name="Django Book",
+            description="Learn backend development",
+            price=Decimal("30.00"),
+            stock=5,
+            category=self.category_books,
+        )
+        self.laptop = Product.objects.create(
+            name="Laptop",
+            description="Portable computer",
+            price=Decimal("900.00"),
+            stock=3,
+            category=self.category_electronics,
+        )
+        self.out_of_stock_phone = Product.objects.create(
+            name="Phone",
+            description="Smartphone",
+            price=Decimal("500.00"),
+            stock=0,
+            category=self.category_electronics,
+        )
+        self.inactive_product = Product.objects.create(
+            name="Hidden Product",
+            description="Inactive item",
+            price=Decimal("100.00"),
+            stock=10,
+            is_active=False,
+            category=self.category_books,
+        )
+
+    def test_product_list_filters_by_category(self):
+        response = self.client.get(f"/api/products/?category={self.category_books.id}")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        product_names = [item["name"] for item in response.data["results"]]
+
+        self.assertIn("Django Book", product_names)
+        self.assertNotIn("Laptop", product_names)
+
+    def test_product_list_filters_by_price_range(self):
+        response = self.client.get("/api/products/?min_price=100&max_price=600")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        product_names = [item["name"] for item in response.data["results"]]
+
+        self.assertIn("Phone", product_names)
+        self.assertNotIn("Django Book", product_names)
+        self.assertNotIn("Laptop", product_names)
+
+    def test_product_list_filters_by_in_stock(self):
+        response = self.client.get("/api/products/?in_stock=true")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        product_names = [item["name"] for item in response.data["results"]]
+
+        self.assertIn("Django Book", product_names)
+        self.assertNotIn("Laptop", product_names)
+        self.assertNotIn("Phone", product_names)
+
+    def test_product_list_supports_search(self):
+        response = self.client.get("/api/products/?search=backend")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        product_names = [item["name"] for item in response.data["results"]]
+
+        self.assertIn("Django Book", product_names)
+        self.assertNotIn("Laptop", product_names)
+
+    def test_product_list_supports_pagination(self):
+        response = self.client.get("/api/products/?limit=2&offset=0")
+        
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn("count", response.data)
+        self.assertIn("next", response.data)
+        self.assertIn("previous", response.data)
+        self.assertIn("results", response.data)
+        self.assertEqual(len(response.data["results"]), 2)
+
+    def test_public_product_list_hides_inactive_products(self):
+        response = self.client.get("/api/products/")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        product_names = [item["name"] for item in response.data["results"]]
+
+        self.assertNotIn("Hidden Product", product_names)

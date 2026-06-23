@@ -20,6 +20,9 @@ from api.serializers import (
 )
 from api.permissions import IsAnonymous
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
+from django_filters.rest_framework import DjangoFilterBackend
+from api.filters import ProductFilter
+from api.pagination import ProductPagination
 
 # Create your views here.
 
@@ -69,7 +72,20 @@ class CategoryRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
 # PRODUCT Views
 
 class ProductListCreateView(generics.ListCreateAPIView):
-    queryset = Product.objects.filter(is_active=True).select_related("category")
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_class = ProductFilter
+    search_fields = ("name", "description")
+    ordering_fields = ("name", "price", "stock", "created_at")
+    ordering = ("name",)
+    pagination_class = ProductPagination
+
+    def get_queryset(self):
+        queryset = Product.objects.select_related("category")
+
+        # Admins can see all products; regular users can only see active products.
+        if self.request.user.is_staff:
+            return queryset
+        return queryset.filter(is_active=True)
 
     def get_serializer_class(self):
         if self.request.method == "GET":

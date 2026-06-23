@@ -3,3 +3,4 @@ djangorestframework
 psycopg[binary]
 Pillow>=10.0
 djangorestframework-simplejwt
+django-filter
