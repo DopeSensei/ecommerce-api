@@ -429,29 +429,28 @@ class OrderStatusUpdateSerializer(serializers.ModelSerializer):
         fields = ("status",)
 
     def validate_status(self, value):
-        current_status = self.instance.status if self.instance else None
+        if self.instance is None:
+            return value
 
-        locked_statuses = {
-            Order.StatusChoices.DELIVERED,
-            Order.StatusChoices.CANCELLED,
-            }
-
-        if current_status in locked_statuses and value != current_status:
-            raise serializers.ValidationError("Finalized orders cannot change status.")
+        if not self.instance.can_transition_to(value):
+            raise serializers.ValidationError(
+                f"Order status cannot change from "
+                f"{self.instance.status} to {value}."
+            )
 
         return value
     
     # Restore stock only when the order transitions into CANCELLED.
-    # If the order is already cancelled, stock must not be restored again.
-    # Delivered or cancelled orders should not move back to another status.
+    # Keep the status update and stock restoration in one transaction.
     def update(self, instance, validated_data):
         old_status = instance.status
         new_status = validated_data.get("status", old_status)
 
-        instance = super().update(instance, validated_data)
+        with transaction.atomic():
+            instance = super().update(instance, validated_data)
 
-        if old_status != Order.StatusChoices.CANCELLED and new_status == Order.StatusChoices.CANCELLED:
-            instance.restore_stock()
+            if old_status != Order.StatusChoices.CANCELLED and new_status == Order.StatusChoices.CANCELLED:
+                instance.restore_stock()
 
         return instance
 
@@ -469,36 +468,122 @@ class OrderPaymentUpdateSerializer(serializers.ModelSerializer):
         return value or None
         
     def validate(self, attrs):
-        current_status = self.instance.payment_status if self.instance else None
-        payment_status = attrs.get("payment_status", current_status)
+        if self.instance is None:
+            return attrs
+
+        current_payment_status = self.instance.payment_status
+        new_payment_status = attrs.get(
+            "payment_status",
+            current_payment_status,
+        )
         payment_id = attrs.get(
             "payment_id",
-            self.instance.payment_id if self.instance else None
+            self.instance.payment_id,
         )
 
-        # Payment reference should exist for paid/refunded/failed states.
-        if payment_status in {"paid", "failed", "refunded"} and not payment_id:
+        reference_required_statuses = {
+            Order.PaymentStatusChoices.PAID,
+            Order.PaymentStatusChoices.FAILED,
+            Order.PaymentStatusChoices.REFUNDED,
+        }
+
+        if new_payment_status in reference_required_statuses and not payment_id:
             raise serializers.ValidationError(
-                {"payment_id": "payment_id is required for this payment status."}
+                {
+                    "payment_id": (
+                        "payment_id is required for this payment status."
+                    )
+                }
             )
 
-        # Prevent going backwards from paid to unpaid.
-        if current_status == "paid" and payment_status == "unpaid":
+        if not self.instance.can_payment_transition_to(new_payment_status):
             raise serializers.ValidationError(
-                {"payment_status": "Paid orders cannot be set back to unpaid."}
+                {
+                    "payment_status": (
+                        f"Payment status cannot change from "
+                        f"{current_payment_status} to "
+                        f"{new_payment_status}."
+                    )
+                }
+            )
+
+        # Do not replace the provider reference after payment processing.
+        if (
+            current_payment_status
+            in {
+                Order.PaymentStatusChoices.PAID,
+                Order.PaymentStatusChoices.FAILED,
+                Order.PaymentStatusChoices.REFUNDED,
+            }
+            and self.instance.payment_id and payment_id != self.instance.payment_id
+        ):
+            raise serializers.ValidationError(
+                {
+                    "payment_id": (
+                        "The payment reference cannot be changed after payment processing."
+                    )
+                }
+            )
+
+        if (
+            current_payment_status != Order.PaymentStatusChoices.PAID
+            and new_payment_status == Order.PaymentStatusChoices.PAID
+            and self.instance.status == Order.StatusChoices.CANCELLED
+        ):
+            raise serializers.ValidationError(
+                {
+                    "payment_status": (
+                        "A cancelled order cannot be marked as paid."
+                    )
+                }
+            )
+
+        if (
+            new_payment_status == Order.PaymentStatusChoices.FAILED
+            and self.instance.status != Order.StatusChoices.CANCELLED
+            and not self.instance.can_transition_to(Order.StatusChoices.CANCELLED)
+        ):
+            raise serializers.ValidationError(
+                {
+                    "payment_status": (
+                        "Payment cannot fail after the order "
+                        "has been shipped or delivered."
+                    )
+                }
+            )
+
+        if (
+            new_payment_status == Order.PaymentStatusChoices.REFUNDED
+            and self.instance.status not in {
+                Order.StatusChoices.CANCELLED,
+                Order.StatusChoices.DELIVERED,
+            }
+        ):
+            raise serializers.ValidationError(
+                {
+                    "payment_status": (
+                        "Only cancelled or delivered orders "
+                        "can be refunded."
+                    )
+                }
             )
 
         return attrs
 
-    # Restore stock if the payment is failed
+    # A terminal payment failure cancels the order and releases its stock.
     def update(self, instance, validated_data):
         old_payment_status = instance.payment_status
         new_payment_status = validated_data.get("payment_status", old_payment_status)
 
-        instance = super().update(instance, validated_data)
+        with transaction.atomic():
+            instance = super().update(instance, validated_data)
 
-        if old_payment_status != "failed" and new_payment_status == "failed":
-            instance.restore_stock()
+            if old_payment_status != Order.PaymentStatusChoices.FAILED and new_payment_status == Order.PaymentStatusChoices.FAILED:
+                if instance.status != Order.StatusChoices.CANCELLED:
+                    instance.status = Order.StatusChoices.CANCELLED
+                    instance.save(update_fields=["status"])
+
+                instance.restore_stock()
 
         return instance
         

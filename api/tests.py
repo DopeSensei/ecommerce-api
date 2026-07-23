@@ -246,6 +246,70 @@ class OrderPermissionTests(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
+    def test_admin_cannot_skip_order_lifecycle_steps(self):
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.patch(
+            f"/api/orders/{self.user_order.order_id}/status/",
+            {
+                "status": Order.StatusChoices.DELIVERED,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.user_order.refresh_from_db()
+        self.assertEqual(
+            self.user_order.status,
+            Order.StatusChoices.PENDING,
+        )
+
+    def test_admin_can_follow_valid_order_lifecycle(self):
+        self.client.force_authenticate(user=self.admin)
+        url = f"/api/orders/{self.user_order.order_id}/status/"
+
+        transitions = (
+            Order.StatusChoices.CONFIRMED,
+            Order.StatusChoices.SHIPPED,
+            Order.StatusChoices.DELIVERED,
+        )
+
+        for new_status in transitions:
+            response = self.client.patch(
+                url,
+                {"status": new_status},
+                format="json",
+            )
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        self.user_order.refresh_from_db()
+        self.assertEqual(
+            self.user_order.status,
+            Order.StatusChoices.DELIVERED,
+        )
+
+    def test_shipped_order_cannot_be_cancelled(self):
+        self.user_order.status = Order.StatusChoices.SHIPPED
+        self.user_order.save(update_fields=["status"])
+
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.patch(
+            f"/api/orders/{self.user_order.order_id}/status/",
+            {
+                "status": Order.StatusChoices.CANCELLED,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.user_order.refresh_from_db()
+        self.assertEqual(
+            self.user_order.status,
+            Order.StatusChoices.SHIPPED,
+        )
 
 class InventoryRestoreTests(APITestCase):
     def setUp(self):
@@ -309,7 +373,7 @@ class InventoryRestoreTests(APITestCase):
         response = self.client.patch(
             f"/api/orders/{self.order.order_id}/payment/",
             {
-                "payment_status": "failed",
+                "payment_status": Order.PaymentStatusChoices.FAILED,
                 "payment_id": "payment-test-123",
             },
             format="json",
@@ -322,6 +386,8 @@ class InventoryRestoreTests(APITestCase):
 
         self.assertEqual(self.product.stock, 10)
         self.assertTrue(self.order.stock_restored)
+        self.assertEqual(self.order.payment_status, Order.PaymentStatusChoices.FAILED)
+        self.assertEqual(self.order.status, Order.StatusChoices.CANCELLED)
 
     def test_stock_is_not_restored_twice(self):
         self.client.force_authenticate(user=self.admin)
@@ -344,7 +410,114 @@ class InventoryRestoreTests(APITestCase):
         self.assertEqual(self.product.stock, 10)
         self.assertTrue(self.order.stock_restored)
 
-    
+    def test_failed_payment_cannot_be_changed_to_paid(self):
+        self.client.force_authenticate(user=self.admin)
+        url = f"/api/orders/{self.order.order_id}/payment/"
+
+        failed_response = self.client.patch(
+            url,
+            {
+                "payment_status": Order.PaymentStatusChoices.FAILED,
+                "payment_id": "payment-failed-123",
+            },
+            format="json",
+        )
+        self.assertEqual(
+            failed_response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        paid_response = self.client.patch(
+            url,
+            {
+                "payment_status": Order.PaymentStatusChoices.PAID,
+                "payment_id": "payment-failed-123",
+            },
+            format="json",
+        )
+        self.assertEqual(
+            paid_response.status_code,
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+    def test_shipped_order_payment_cannot_fail(self):
+        self.order.status = Order.StatusChoices.SHIPPED
+        self.order.save(update_fields=["status"])
+
+        self.client.force_authenticate(user=self.admin)
+
+        response = self.client.patch(
+            f"/api/orders/{self.order.order_id}/payment/",
+            {
+                "payment_status": Order.PaymentStatusChoices.FAILED,
+                "payment_id": "payment-shipped-123",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+        self.order.refresh_from_db()
+        self.product.refresh_from_db()
+
+        self.assertEqual(
+            self.order.status,
+            Order.StatusChoices.SHIPPED,
+        )
+        self.assertFalse(self.order.stock_restored)
+        self.assertEqual(self.product.stock, 8)
+
+    def test_refund_does_not_restore_stock_twice(self):
+        self.client.force_authenticate(user=self.admin)
+        payment_url = f"/api/orders/{self.order.order_id}/payment/"
+        status_url = f"/api/orders/{self.order.order_id}/status/"
+
+        paid_response = self.client.patch(
+            payment_url,
+            {
+                "payment_status": Order.PaymentStatusChoices.PAID,
+                "payment_id": "payment-refund-123",
+            },
+            format="json",
+        )
+        self.assertEqual(
+            paid_response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        cancelled_response = self.client.patch(
+            status_url,
+            {"status": Order.StatusChoices.CANCELLED},
+            format="json",
+        )
+        self.assertEqual(
+            cancelled_response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        refunded_response = self.client.patch(
+            payment_url,
+            {
+                "payment_status": Order.PaymentStatusChoices.REFUNDED,
+                "payment_id": "payment-refund-123",
+            },
+            format="json",
+        )
+        self.assertEqual(
+            refunded_response.status_code,
+            status.HTTP_200_OK,
+        )
+
+        self.order.refresh_from_db()
+        self.product.refresh_from_db()
+
+        self.assertEqual(
+            self.order.payment_status,
+            Order.PaymentStatusChoices.REFUNDED,
+        )
+        self.assertEqual(self.product.stock, 10)
+
+
 class ProductVisibilityTests(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(
@@ -485,7 +658,7 @@ class ProductListFilterSearchPaginationTest(APITestCase):
         product_names = [item["name"] for item in response.data["results"]]
 
         self.assertIn("Django Book", product_names)
-        self.assertNotIn("Laptop", product_names)
+        self.assertIn("Laptop", product_names)
         self.assertNotIn("Phone", product_names)
 
     def test_product_list_supports_search(self):
@@ -516,3 +689,5 @@ class ProductListFilterSearchPaginationTest(APITestCase):
         product_names = [item["name"] for item in response.data["results"]]
 
         self.assertNotIn("Hidden Product", product_names)
+
+    

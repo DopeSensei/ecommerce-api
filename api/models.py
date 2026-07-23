@@ -113,6 +113,40 @@ class Order(models.Model):
         DELIVERED = 'Delivered'
         CANCELLED = 'Cancelled'
 
+    class PaymentStatusChoices(models.TextChoices):
+        UNPAID = "unpaid", "Unpaid"
+        PAID = "paid", "Paid"
+        FAILED = "failed", "Failed"
+        REFUNDED = "refunded", "Refunded"
+
+    ALLOWED_STATUS_TRANSITIONS = {
+        StatusChoices.PENDING: {
+            StatusChoices.CONFIRMED,
+            StatusChoices.CANCELLED,
+        },
+        StatusChoices.CONFIRMED: {
+            StatusChoices.SHIPPED,
+            StatusChoices.CANCELLED,
+        },
+        StatusChoices.SHIPPED: {
+            StatusChoices.DELIVERED,
+        },
+        StatusChoices.DELIVERED: set(),
+        StatusChoices.CANCELLED: set(),
+    }
+
+    ALLOWED_PAYMENT_TRANSITIONS = {
+        PaymentStatusChoices.UNPAID: {
+            PaymentStatusChoices.PAID,
+            PaymentStatusChoices.FAILED,
+        },
+        PaymentStatusChoices.PAID: {
+            PaymentStatusChoices.REFUNDED,
+        },
+        PaymentStatusChoices.FAILED: set(),
+        PaymentStatusChoices.REFUNDED: set(),
+    }
+
     order_id = models.UUIDField(primary_key=True, default=uuid.uuid4)
     # Keep order history if a user account is deleted.
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
@@ -129,13 +163,8 @@ class Order(models.Model):
 
     payment_status = models.CharField(
         max_length=20,
-        choices=[
-            ("unpaid", "Unpaid"),
-            ("paid", "Paid"),
-            ("failed", "Failed"),
-            ("refunded", "Refunded"),
-        ],
-        default="unpaid"
+        choices=PaymentStatusChoices.choices,
+        default=PaymentStatusChoices.UNPAID,
     )
 
     payment_id = models.CharField(max_length=100, unique=True, null=True, blank=True)
@@ -143,15 +172,31 @@ class Order(models.Model):
     # Prevent returning stock more than once for the same order
     stock_restored = models.BooleanField(default=False)
 
+    def can_transition_to(self, new_status):
+        if new_status == self.status:
+            return True
+
+        allowed_statuses = self.ALLOWED_STATUS_TRANSITIONS.get(
+            self.status,
+            set(),
+        )
+        return new_status in allowed_statuses
+
+    def can_payment_transition_to(self, new_payment_status):
+        if new_payment_status == self.payment_status:
+            return True
+
+        allowed_statuses = self.ALLOWED_PAYMENT_TRANSITIONS.get(
+            self.payment_status,
+            set(),
+        )
+        return new_payment_status in allowed_statuses
+
     def calculate_total(self):
         total = sum((item.item_subtotal for item in self.items.all()), Decimal("0.00"))
         self.total_price = total
         self.save(update_fields=["total_price"])
         return total
-
-    def mark_as_paid(self):
-        self.payment_status = "paid"
-        self.save(update_fields=["payment_status"])
 
     def restore_stock(self):
         # Make sure ALL database operations here succeed.
