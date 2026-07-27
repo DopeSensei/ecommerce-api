@@ -251,6 +251,64 @@ class OrderItem(models.Model):
         return f"{self.quantity} x {self.product.name} in Order {self.order.order_id}"
     
 
+class Payment(models.Model):
+    class StatusChoices(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PAID = "paid", "Paid"
+        FAILED = "failed", "Failed"
+        REFUNDED = "refunded", "Refunded"
+
+    class ProviderChoices(models.TextChoices):
+        # Simulates a payment provider during development without processing real money.
+        MOCK = "mock", "Mock"
+
+    ALLOWED_STATUS_TRANSITIONS = {
+        StatusChoices.PENDING: {
+            StatusChoices.PAID,
+            StatusChoices.FAILED,
+        },
+        StatusChoices.PAID: {
+            StatusChoices.REFUNDED,
+        },
+        StatusChoices.FAILED: set(),
+        StatusChoices.REFUNDED: set(),
+    }
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="payments")
+    amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))])
+    currency = models.CharField(max_length=3, default="USD")
+    status = models.CharField(max_length=20, choices=StatusChoices.choices, default=StatusChoices.PENDING)
+    provider = models.CharField(max_length=30, choices=ProviderChoices.choices, default=ProviderChoices.MOCK)
+    provider_reference = models.CharField(max_length=150, unique=True, null=True, blank=True)
+    idempotency_key = models.UUIDField(unique=True)
+    failure_reason = models.TextField(blank=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("-created_at",)
+        # Prevents zero or negative payment amounts at the database level.
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount__gt=0),
+                name="payment_amount_greater_than_zero",
+            )
+        ]
+
+    def can_transition_to(self, new_status):
+        if new_status == self.status:
+            return True
+
+        allowed_statuses = self.ALLOWED_STATUS_TRANSITIONS.get(self.status, set())
+
+        return new_status in allowed_statuses
+
+    def __str__(self):
+        return f"Payment {self.id} for Order {self.order_id}"
+
+
 class Cart(models.Model):
     # Prevent multiple carts per user
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='cart')

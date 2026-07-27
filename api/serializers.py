@@ -1,6 +1,6 @@
 from django.db import transaction
 from rest_framework import serializers
-from .models import Product, Order, OrderItem, User, Address, Cart, CartItem, Category
+from .models import Product, Order, OrderItem, User, Address, Cart, CartItem, Category, Payment
 
 
 # USER Serializers
@@ -421,6 +421,179 @@ class OrderReadSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+# Payment Serializers
+class PaymentReadSerializer(serializers.ModelSerializer):
+    order_id = serializers.UUIDField(read_only=True)
+
+    class Meta:
+        model = Payment
+        fields = (
+            "id",
+            "order_id",
+            "amount",
+            "currency",
+            "status",
+            "provider",
+            "provider_reference",
+            "idempotency_key",
+            "failure_reason",
+            "processed_at",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
+class PaymentCreateSerializer(serializers.Serializer):
+    order = serializers.PrimaryKeyRelatedField(queryset=Order.objects.all())
+    idempotency_key = serializers.UUIDField()
+
+    def validate(self, attrs):
+        request = self.context.get("request")
+        user = (request.user if request and request.user.is_authenticated else None)
+
+        if user is None:
+            raise serializers.ValidationError(
+                "Authentication is required to create a payment."
+            )
+
+        order = attrs["order"]
+        idempotency_key = attrs["idempotency_key"]
+
+        if order.user_id != user.id:
+            raise serializers.ValidationError(
+                {"order": "You can only pay for your own order."}
+            )
+
+        existing_payment = Payment.objects.filter(
+            idempotency_key=idempotency_key,
+        ).first()
+
+        if existing_payment is not None:
+            if existing_payment.order_id != order.pk:
+                raise serializers.ValidationError(
+                    {
+                        "idempotency_key": (
+                            "This idempotency key belongs to "
+                            "a different order."
+                        )
+                    }
+                )
+
+            # Reusing the same key for the same order returns the original payment.
+            attrs["existing_payment"] = existing_payment
+            return attrs
+
+        if order.status != Order.StatusChoices.PENDING:
+            raise serializers.ValidationError(
+                {
+                    "order": (
+                        "Payment can only be started for a pending order."
+                    )
+                }
+            )
+
+        if order.payment_status != Order.PaymentStatusChoices.UNPAID:
+            raise serializers.ValidationError(
+                {
+                    "order": (
+                        "This order is not waiting for payment."
+                    )
+                }
+            )
+
+        if order.total_price <= 0:
+            raise serializers.ValidationError(
+                {"order": "Order total must be greater than zero."}
+            )
+
+        return attrs
+
+    # Amount, status and provider are controlled by the backend,
+    # so clients cannot manipulate payment-critical fields.
+    def create(self, validated_data):
+        order = self.validated_data["order"]
+        idempotency_key = validated_data["idempotency_key"]
+        existing_payment = validated_data.get("existing_payment")
+
+        if existing_payment is not None:
+            self.was_replayed = True
+            return existing_payment
+
+        request = self.context.get("request")
+        user = request.user
+
+        with transaction.atomic():
+            # Lock the order while creating a payment so concurrent requests
+            # cannot create multiple active attempts for the same order.
+            order = Order.objects.select_for_update().get(pk=order.pk)
+
+            if order.user_id != user.id:
+                raise serializers.ValidationError(
+                    {"order": "You can only pay for your own order."}
+                )
+
+            # Check again after acquiring the lock because another request
+            # may have created this payment after validation.
+            existing_payment = Payment.objects.filter(
+                idempotency_key=idempotency_key,
+            ).first()
+
+            if existing_payment is not None:
+                if existing_payment.order_id != order.pk:
+                    raise serializers.ValidationError(
+                        {
+                            "idempotency_key": (
+                                "This idempotency key belongs to a different order."
+                            )
+                        }
+                    )
+
+                self.was_replayed = True
+                return existing_payment
+
+            if order.status != Order.StatusChoices.PENDING:
+                raise serializers.ValidationError(
+                    {"order": "Payment can only be started for a pending order."}
+                )
+
+            if order.payment_status != Order.PaymentStatusChoices.UNPAID:
+                raise serializers.ValidationError(
+                    {
+                        "order": (
+                            "This order is not waiting for payment."
+                        )
+                    }
+                )
+
+            if order.total_price <= 0:
+                raise serializers.ValidationError(
+                    {"order": "Order total must be greater than zero."}
+                )
+
+            if Payment.objects.filter(
+                order=order,
+                status=Payment.StatusChoices.PENDING,
+            ).exists():
+                raise serializers.ValidationError(
+                    {
+                        "order": (
+                            "This order already has a pending payment."
+                        )
+                    }
+                )
+
+            payment = Payment.objects.create(
+                order=order,
+                amount=order.total_price,
+                idempotency_key=idempotency_key,
+            )
+
+        self.was_replayed = False
+        return payment
+
+
+        
 
 # Admin
 class OrderStatusUpdateSerializer(serializers.ModelSerializer):
