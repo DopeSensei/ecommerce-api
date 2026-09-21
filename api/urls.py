@@ -47,4 +47,7 @@ urlpatterns = [
     path("token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("token/verify/", TokenVerifyView.as_view(), name="token_verify"),
+
+    path("payments/", views.PaymentListCreateView.as_view(), name="payment-list-create"),
+    path("payments/<uuid:pk>/", views.PaymentRetrieveView.as_view(), name="payment-detail"),
 ]

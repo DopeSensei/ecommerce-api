@@ -1,7 +1,7 @@
 from rest_framework import filters, generics, viewsets, mixins, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
-from api.models import User, Product, Category, Order, Cart, CartItem
+from api.models import User, Product, Category, Order, Cart, CartItem, Payment
 from api.serializers import (
     UserCreateSerializer, 
     UserReadSerializer, 
@@ -17,6 +17,8 @@ from api.serializers import (
     CartItemReadSerializer,
     CartItemQuantityUpdateSerializer,
     CheckoutSerializer,
+    PaymentCreateSerializer,
+    PaymentReadSerializer
 )
 from api.permissions import IsAnonymous
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
@@ -190,6 +192,48 @@ class CheckoutView(generics.GenericAPIView):
             OrderReadSerializer(order, context=self.get_serializer_context()).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class PaymentListCreateView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = Payment.objects.select_related("order", "order__user")
+
+        if self.request.user.is_staff:
+            return queryset
+        return queryset.filter(order__user=self.request.user)
+
+    def get_serializer_class(self):
+        if self.request.method == "POST":
+            return PaymentCreateSerializer
+        return PaymentReadSerializer
+
+    # Override create() to return the full read representation and distinguish
+    # newly created payments (201) from idempotent replays (200).
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payment = serializer.save()
+
+        # Replayed idempotent requests return the existing resource instead of creating another payment attempt.
+        response_status = (status.HTTP_200_OK if serializer.was_replayed else status.HTTP_201_CREATED)
+        response_serializer = PaymentReadSerializer(payment, context=self.get_serializer_context())
+
+        return Response(response_serializer.data, status=response_status)
+
+
+class PaymentRetrieveView(generics.RetrieveAPIView):
+    serializer_class = PaymentReadSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = Payment.objects.select_related("order", "order__user")
+
+        if self.request.user.is_staff:
+            return queryset
+        return queryset.filter(order__user=self.request.user)
+
 
     
 # ORDER Views

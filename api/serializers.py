@@ -512,7 +512,7 @@ class PaymentCreateSerializer(serializers.Serializer):
     # Amount, status and provider are controlled by the backend,
     # so clients cannot manipulate payment-critical fields.
     def create(self, validated_data):
-        order = self.validated_data["order"]
+        order = validated_data["order"]
         idempotency_key = validated_data["idempotency_key"]
         existing_payment = validated_data.get("existing_payment")
 
